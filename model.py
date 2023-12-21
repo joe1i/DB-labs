@@ -1,15 +1,63 @@
 import psycopg2
 from data_fill import Data
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
+
+Base = declarative_base()
+
+
+class UserModel(Base):
+    __tablename__ = 'User'
+
+    userID = Column(Integer, primary_key=True)
+    name = Column(String)
+    country = Column(String)
+    info = Column(String)
+    artist = relationship('ArtistModel', uselist=False, back_populates='user')
+    collector = relationship('CollectorModel', uselist=False, back_populates='user')
+
+
+class ArtistModel(Base):
+    __tablename__ = 'Artist'
+
+    userID = Column(Integer, ForeignKey('User.userID'), primary_key=True)
+    user = relationship('UserModel', back_populates='artist')
+    art_created = relationship('ArtModel', foreign_keys='ArtModel.creatorID', back_populates='creator')
+
+
+class CollectorModel(Base):
+    __tablename__ = 'Collector'
+
+    userID = Column(Integer, ForeignKey('User.userID'), primary_key=True)
+    user = relationship('UserModel', back_populates='collector')
+    art_purchased = relationship('ArtModel', foreign_keys='ArtModel.buyerID', back_populates='buyer')
+
+
+class ArtModel(Base):
+    __tablename__ = 'Work of art'
+
+    artID = Column(Integer, primary_key=True)
+    name = Column(String)
+    price = Column(Integer)
+    style = Column(String)
+    genre = Column(String)
+    buyerID = Column(Integer, ForeignKey('Collector.userID'))
+    creatorID = Column(Integer, ForeignKey('Artist.userID'))
+    buyer = relationship('CollectorModel', foreign_keys=[buyerID], back_populates='art_purchased')
+    creator = relationship('ArtistModel', foreign_keys=[creatorID], back_populates='art_created')
+
 
 class Model:
-    def __init__(self):
+    def __init__(self, dbname, user, password, host='localhost', port=5432):
         self.conn = psycopg2.connect(
-            dbname='Arts Platform',
-            user='postgres',
-            password='qwerty',
-            host='localhost',
-            port=5432
+            dbname=dbname,
+            user=user,
+            password=password,
+            host=host,
+            port=port
         )
+
         self.data_fill = Data()
         self.create_random_data_table("styles", self.data_fill.styles)
         self.create_random_data_table("genres", self.data_fill.genres)
@@ -20,54 +68,98 @@ class Model:
         self.create_random_data_table("nouns", self.data_fill.nouns)
         self.create_random_data_table("verbs", self.data_fill.verbs)
 
+        # Підключення до бази даних з використанням SQLAlchemy
+        self.engine = create_engine(
+            f'postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}',
+            echo=True
+        )
+        Base.metadata.create_all(self.engine)
+
+
 # -------- User
     def add_user(self, name, country, info):
-        c = self.conn.cursor()
-        c.execute('INSERT INTO "User" ("name", country, "info") VALUES (%s, %s, %s) RETURNING "userID"', (name, country, info))
-        user_id = c.fetchone()[0]
-        self.conn.commit()
-        return user_id
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        new_user = UserModel(name=name, country=country, info=info)
+        session.add(new_user)
+        session.commit()
+
+        return new_user.userID
 
     def get_all_users(self):
-        c = self.conn.cursor()
-        c.execute('SELECT * FROM "User" ORDER BY "userID" ASC ')
-        return c.fetchall()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+        users = session.query(UserModel.userID, UserModel.name, UserModel.country, UserModel.info).all()
+        return users
 
     def edit_user(self, user_id, name, country, info):
-        c = self.conn.cursor()
-        c.execute('UPDATE "User" SET "name"=%s, "country"=%s, "info"=%s WHERE "userID"=%s', (name, country, info, user_id))
-        self.conn.commit()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        user_to_edit = session.query(UserModel).filter_by(userID=user_id).first()
+
+        if user_to_edit:
+            user_to_edit.name = name
+            user_to_edit.country = country
+            user_to_edit.info = info
+            session.commit()
+
+        session.close()
 
 # -------- Artist
     def add_artist(self, name, country, info):
-        c = self.conn.cursor()
-        userID = self.add_user(name, country, info)
-        c.execute('INSERT INTO "Artist" ("userID") VALUES (%s)', (userID,))
-        self.conn.commit()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        new_user = UserModel(name=name, country=country, info=info)
+        session.add(new_user)
+        session.commit()
+
+        new_artist = ArtistModel(user=new_user)
+        session.add(new_artist)
+        session.commit()
+
+        return new_artist.userID
 
     def get_all_artists(self):
-        c = self.conn.cursor()
-        c.execute('''SELECT U."userID", U."name", U."country", U."info" FROM "User" AS U
-                             INNER JOIN "Artist" ON U."userID" = "Artist"."userID"
-                             ORDER BY "userID" ASC ;''')
-        return c.fetchall()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        artists = (
+            session.query(UserModel.userID, UserModel.name, UserModel.country, UserModel.info)
+            .join(ArtistModel, UserModel.userID == ArtistModel.userID)
+            .order_by(UserModel.userID.asc())
+            .all()
+        )
+
+        session.close()
+        return artists
 
     def get_artist(self, user_id):
-        c = self.conn.cursor()
-        c.execute('''SELECT U."userID", U."name", U."country", U."info" FROM "User" AS U
-                                   INNER JOIN "Artist" ON U."userID" = "Artist"."userID"
-                                   WHERE "Artist"."userID" = %s;''', (user_id,))
-        artist = c.fetchone()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        artist = (
+            session.query(UserModel.userID, UserModel.name, UserModel.country, UserModel.info)
+            .join(ArtistModel, UserModel.userID == ArtistModel.userID)
+            .filter(ArtistModel.userID == user_id)
+            .first()
+        )
+
+        session.close()
         return artist
 
     def remove_artist(self, user_id):
-        c = self.conn.cursor()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
 
-        c.execute('DELETE FROM "Work of art" WHERE "creatorID"=%s', (user_id,))
-        c.execute('DELETE FROM "Artist" WHERE "userID"=%s', (user_id,))
+        session.query(ArtModel).filter_by(creatorID=user_id).delete()
+        session.query(ArtistModel).filter_by(userID=user_id).delete()
+        session.query(UserModel).filter_by(userID=user_id).delete()
 
-        c.execute('DELETE FROM "User" WHERE "userID"=%s', (user_id,))
-        self.conn.commit()
+        session.commit()
+        session.close()
 
     def rand_fill_artist(self, count):
         c = self.conn.cursor()
@@ -113,34 +205,57 @@ class Model:
 
 # -------- Collector
     def add_collector(self, name, country, info):
-        c = self.conn.cursor()
-        userID = self.add_user(name, country, info)
-        c.execute('INSERT INTO "Collector" ("userID") VALUES (%s)', (userID,))
-        self.conn.commit()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        new_user = UserModel(name=name, country=country, info=info)
+        session.add(new_user)
+        session.commit()
+
+        new_collector = CollectorModel(user=new_user)
+        session.add(new_collector)
+        session.commit()
+
+        return new_collector.userID
 
     def get_all_collectors(self):
-        c = self.conn.cursor()
-        c.execute('''SELECT U."userID", U."name", U."country", U."info" FROM "User" AS U
-                     INNER JOIN "Collector" ON U."userID" = "Collector"."userID"
-                     ORDER BY "userID" ASC ;''')
-        return c.fetchall()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        collectors = (
+            session.query(UserModel.userID, UserModel.name, UserModel.country, UserModel.info)
+            .join(CollectorModel, UserModel.userID == CollectorModel.userID)
+            .order_by(UserModel.userID.asc())
+            .all()
+        )
+
+        session.close()
+        return collectors
 
     def get_collector(self, user_id):
-        c = self.conn.cursor()
-        c.execute('''SELECT U."userID", U."name", U."country", U."info" FROM "User" AS U
-                           INNER JOIN "Collector" ON U."userID" = "Collector"."userID"
-                           WHERE "Collector"."userID" = %s;''',(user_id,))
-        collector = c.fetchone()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        collector = (
+            session.query(UserModel.userID, UserModel.name, UserModel.country, UserModel.info)
+            .join(CollectorModel, UserModel.userID == CollectorModel.userID)
+            .filter(CollectorModel.userID == user_id)
+            .first()
+        )
+
+        session.close()
         return collector
 
     def remove_collector(self, user_id):
-        c = self.conn.cursor()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
 
-        c.execute('UPDATE "Work of art" SET "buyerID"=NULL WHERE "buyerID"=%s', (user_id,))
-        c.execute('DELETE FROM "Collector" WHERE "userID"=%s', (user_id,))
+        session.query(ArtModel).filter_by(buyerID=user_id).update({ArtModel.buyerID: None})
+        session.query(CollectorModel).filter_by(userID=user_id).delete()
+        session.query(UserModel).filter_by(userID=user_id).delete()
 
-        c.execute('DELETE FROM "User" WHERE "userID"=%s', (user_id,))
-        self.conn.commit()
+        session.commit()
+        session.close()
 
     def rand_fill_collector(self, count):
         c = self.conn.cursor()
@@ -186,38 +301,72 @@ class Model:
 
 # -------- Work of art
     def add_art(self, name, price, style, genre, creatorID):
-        c = self.conn.cursor()
-        c.execute('INSERT INTO "Work of art" ("name", price, "style", "genre", "buyerID", "creatorID") VALUES (%s, %s, %s, %s, null, %s)', (name, price, style, genre, creatorID))
-        self.conn.commit()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        new_art = ArtModel(name=name, price=price, style=style, genre=genre, creatorID=creatorID, buyerID=None)
+        session.add(new_art)
+        session.commit()
 
 
     def get_all_arts(self):
-        c = self.conn.cursor()
-        c.execute('SELECT * FROM "Work of art" ORDER BY "artID" ASC ')
-        return c.fetchall()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        arts = session.query(
+                ArtModel.artID,
+                ArtModel.name,
+                ArtModel.price,
+                ArtModel.style,
+                ArtModel.genre,
+                ArtModel.buyerID,
+                ArtModel.creatorID).all()
+
+        session.close()
+        return arts
 
     def get_art(self, art_id):
-        c = self.conn.cursor()
-        c.execute('SELECT * FROM "Work of art" WHERE "artID"=%s',(art_id,))
-        art = c.fetchone()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        art = session.query(
+            ArtModel.artID,
+            ArtModel.name,
+            ArtModel.price,
+            ArtModel.style,
+            ArtModel.genre,
+            ArtModel.buyerID,
+            ArtModel.creatorID).filter_by(artID=art_id).first()
+
+        session.close()
         return art
 
     def edit_art(self, art_id, name, price, style, genre, buyerID, creatorID):
-        c = self.conn.cursor()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
 
-        c.execute('UPDATE "Work of art" SET "name"=%s, price=%s, "style"=%s, "genre"=%s, "creatorID"=%s WHERE "artID"=%s', (name, price, style, genre, creatorID, art_id))
+        art = session.query(ArtModel).filter_by(artID=art_id).first()
 
-        if not buyerID:
-            c.execute('UPDATE "Work of art" SET "buyerID"=null WHERE "artID"=%s', (art_id,))
-        else:
-            c.execute('UPDATE "Work of art" SET "buyerID"=%s WHERE "artID"=%s', (buyerID, art_id))
+        if art:
+            art.name = name
+            art.price = price
+            art.style = style
+            art.genre = genre
+            art.creatorID = creatorID
+            art.buyerID = buyerID
 
-        self.conn.commit()
+            session.commit()
+
+        session.close()
 
     def remove_art(self, art_id):
-        c = self.conn.cursor()
-        c.execute('DELETE FROM "Work of art" WHERE "artID"=%s', (art_id,))
-        self.conn.commit()
+        Session = sessionmaker(bind=self.engine)
+        session = Session()
+
+        session.query(ArtModel).filter_by(artID=art_id).delete()
+
+        session.commit()
+        session.close()
 
     def buy_art(self, buyer_id, art_id):
         c = self.conn.cursor()
